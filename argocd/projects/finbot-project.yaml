@@ -1,0 +1,51 @@
+# AppProject — the guardrail. Every finbot Application belongs to this project,
+# which limits WHAT Argo is allowed to deploy, WHERE, and FROM WHICH repo.
+# This is production hygiene: a scoped project can't accidentally deploy random
+# manifests from a random repo into kube-system.
+apiVersion: argoproj.io/v1alpha1
+kind: AppProject
+metadata:
+  name: finbot
+  namespace: argocd
+  # keep the project even if its parent app is pruned
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  description: finbot LLM platform (Days 1-8)
+
+  # WHICH repo Argo may pull from. Replace with your real Git URL.
+  sourceRepos:
+    - "https://github.com/vin-ML-dev/finbot-mlops.git"
+    - "https://github.com/vin-ML-dev/finbot-mlops"
+    # Helm repo for the monitoring stack (kube-prometheus-stack)
+    - "https://prometheus-community.github.io/helm-charts"
+
+  # WHERE Argo may deploy (namespace + cluster). Locked to our two namespaces.
+  destinations:
+    - server: https://kubernetes.default.svc
+      namespace: finbot
+    - server: https://kubernetes.default.svc
+      namespace: monitoring
+    - server: https://kubernetes.default.svc
+      namespace: argocd
+
+  # Cluster-scoped resources Argo may create (namespaces, CRDs from the
+  # monitoring stack + sealed-secrets, RBAC for the agent).
+  clusterResourceWhitelist:
+    - group: ""
+      kind: Namespace
+    - group: apiextensions.k8s.io
+      kind: CustomResourceDefinition
+    - group: rbac.authorization.k8s.io
+      kind: ClusterRole
+    - group: rbac.authorization.k8s.io
+      kind: ClusterRoleBinding
+    - group: monitoring.coreos.com
+      kind: "*"
+    - group: bitnami.com
+      kind: "*"
+
+  # Namespaced resources are unrestricted within the allowed namespaces.
+  namespaceResourceWhitelist:
+    - group: "*"
+      kind: "*"

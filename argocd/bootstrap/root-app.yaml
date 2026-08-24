@@ -1,0 +1,35 @@
+# Root App-of-Apps — THE ONE manifest you apply by hand.
+#
+# It points Argo at the argocd/apps/ folder. Every file there is itself an
+# Argo Application (one per platform component). Applying THIS makes Argo
+# discover and sync all of them, in sync-wave order. After this, you never
+# `kubectl apply` a component again — you `git push` and Argo syncs.
+#
+#   kubectl apply -f argocd/bootstrap/root-app.yaml
+#
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: finbot-root
+  namespace: argocd
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: finbot
+
+  source:
+    # Replace with your real Git URL. Argo reads the app manifests from here.
+    repoURL: "https://github.com/vin-ML-dev/finbot-mlops.git"
+    targetRevision: main
+    path: argocd/apps          # every Application in this folder becomes a child app
+
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: argocd
+
+  syncPolicy:
+    automated:
+      prune: true              # remove resources deleted from Git
+      selfHeal: true           # revert manual drift back to Git state
+    syncOptions:
+      - CreateNamespace=true

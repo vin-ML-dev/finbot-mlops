@@ -1,0 +1,56 @@
+# 3-node kind cluster that mirrors the Hetzner topology.
+#   control-plane = Node A (gateway, redis, prometheus, alertmanager, grafana, argocd)
+#   worker #1     = Node B (llama.cpp model — heaviest)
+#   worker #2     = Node C (langgraph monitoring agent)
+#
+# kind "nodes" are Docker containers on ONE host, so they SHARE your laptop's RAM.
+# Pinning is real and demonstrable; true node-failure isolation is not (that needs real
+# Hetzner nodes). Give Docker ~10-12 GB or the API server will drop under load.
+#
+# Node roles are set with kubernetes labels (node-labels via kubeadm) so the same
+# nodeSelector/affinity used on Hetzner works here unchanged. Taints on B and C are
+# applied AFTER creation by label-nodes.sh (kind can't taint from this file reliably).
+kind: Cluster
+apiVersion: kind.x-k8s.io/v1alpha4
+name: finbot
+nodes:
+  # ---- Node A : control-plane + infra/monitoring ----
+  - role: control-plane
+    labels:
+      node-role: infra
+    kubeadmConfigPatches:
+      # Node A also hosts ingress-eligible services locally; expose 80/443 via extraPortMappings.
+      - |
+        kind: InitConfiguration
+        nodeRegistration:
+          kubeletExtraArgs:
+            node-labels: "node-role=infra"
+    extraPortMappings:
+      - containerPort: 80
+        hostPort: 8080
+        protocol: TCP
+      - containerPort: 443
+        hostPort: 8443
+        protocol: TCP
+
+  # ---- Node B : model (heaviest workload) ----
+  - role: worker
+    labels:
+      node-role: model
+    kubeadmConfigPatches:
+      - |
+        kind: JoinConfiguration
+        nodeRegistration:
+          kubeletExtraArgs:
+            node-labels: "node-role=model"
+
+  # ---- Node C : monitoring agent (survives the rest) ----
+  - role: worker
+    labels:
+      node-role: agent
+    kubeadmConfigPatches:
+      - |
+        kind: JoinConfiguration
+        nodeRegistration:
+          kubeletExtraArgs:
+            node-labels: "node-role=agent"

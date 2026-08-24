@@ -1,0 +1,31 @@
+# Child app (wave 0): the finbot namespace.
+#
+# This is the FIRST thing the root app syncs — everything else deploys into
+# this namespace, so it must exist first. It also serves as the proof that the
+# App-of-Apps chain works end to end before we add real workloads.
+#
+# sync-wave -1 so it runs before any wave-0 workload that lands in the namespace.
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: namespace
+  namespace: argocd
+  annotations:
+    argocd.argoproj.io/sync-wave: "-1"
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: finbot
+  source:
+    repoURL: "https://github.com/vin-ML-dev/finbot-mlops.git"
+    targetRevision: main
+    path: deploy/base/namespace
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: finbot
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=true

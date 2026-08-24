@@ -1,0 +1,18 @@
+# terraform
+**/.terraform/*
+*.tfstate
+*.tfstate.*
+**/finbot-config
+crash.log
+
+# python / misc
+__pycache__/
+*.pyc
+.venv/
+venv/
+.env
+
+# never commit real secrets
+**/secret.yaml
+!**/*.example.yaml
+**/terraform/LICENSE.txt

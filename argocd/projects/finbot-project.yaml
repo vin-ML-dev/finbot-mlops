@@ -20,8 +20,8 @@ spec:
     # Helm repo for the monitoring stack (kube-prometheus-stack)
     - "https://prometheus-community.github.io/helm-charts"
     # Helm repo for the Sealed Secrets controller
-    - "https://bitnami-labs.github.io/sealed-secrets"
-    - "ghcr.io/bitnami-labs/sealed-secrets"
+    - "https://bitnami.github.io/sealed-secrets"
+    #- "https://bitnami.github.io/sealed-secrets"
 
   # WHERE Argo may deploy (namespace + cluster). Locked to our two namespaces.
   destinations:

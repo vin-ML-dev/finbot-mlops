@@ -11,7 +11,7 @@ metadata:
   finalizers:
     - resources-finalizer.argocd.argoproj.io
 spec:
-  description: finbot LLM platform (Days 1-8)
+  description: finbot LLM platform
 
   # WHICH repo Argo may pull from. Replace with your real Git URL.
   sourceRepos:
@@ -19,6 +19,8 @@ spec:
     - "https://github.com/vin-ML-dev/finbot-mlops"
     # Helm repo for the monitoring stack (kube-prometheus-stack)
     - "https://prometheus-community.github.io/helm-charts"
+    # Helm repo for the Sealed Secrets controller
+    - "https://bitnami-labs.github.io/sealed-secrets"
 
   # WHERE Argo may deploy (namespace + cluster). Locked to our two namespaces.
   destinations:
@@ -28,6 +30,8 @@ spec:
       namespace: monitoring
     - server: https://kubernetes.default.svc
       namespace: argocd
+    - server: https://kubernetes.default.svc
+      namespace: kube-system      # sealed-secrets controller lives here
 
   # Cluster-scoped resources Argo may create (namespaces, CRDs from the
   # monitoring stack + sealed-secrets, RBAC for the agent).

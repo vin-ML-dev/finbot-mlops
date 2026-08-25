@@ -21,6 +21,7 @@ spec:
     - "https://prometheus-community.github.io/helm-charts"
     # Helm repo for the Sealed Secrets controller
     - "https://bitnami-labs.github.io/sealed-secrets"
+    - "ghcr.io/bitnami-labs/sealed-secrets"
 
   # WHERE Argo may deploy (namespace + cluster). Locked to our two namespaces.
   destinations:

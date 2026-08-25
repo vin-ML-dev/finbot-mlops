@@ -1,0 +1,73 @@
+# Redis as a StatefulSet — shared state for the platform:
+#   - gateway: response cache + rate-limit counters
+#   - agent:   incident state (so it doesn't re-explain the same outage)
+#
+# StatefulSet (not Deployment) gives a stable network identity + its own
+# persistent volume, so state survives a pod restart. NOTE: one replica =
+# STATEFUL, not HA. Real HA needs replication + failover (Sentinel/Cluster);
+# that's a documented productionization step, not this component.
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: redis
+  namespace: finbot
+  labels:
+    app: redis
+spec:
+  serviceName: redis          # must match the headless Service name
+  replicas: 1
+  selector:
+    matchLabels:
+      app: redis
+  template:
+    metadata:
+      labels:
+        app: redis
+    spec:
+      # Redis is core infra -> Node A. Node A (control-plane) is untainted, so no
+      # toleration is needed; affinity prefers the infra node.
+      affinity:
+        nodeAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              preference:
+                matchExpressions:
+                  - key: node-role
+                    operator: In
+                    values: ["infra"]
+      containers:
+        - name: redis
+          image: redis:7.2-alpine
+          args:
+            - "--save"
+            - "60"
+            - "1"                 # snapshot to disk if >=1 key changed in 60s
+            - "--appendonly"
+            - "no"
+          ports:
+            - name: redis
+              containerPort: 6379
+          resources:
+            requests: { cpu: "25m", memory: "64Mi" }
+            limits:   { memory: "256Mi" }
+          livenessProbe:
+            tcpSocket: { port: 6379 }
+            initialDelaySeconds: 10
+            periodSeconds: 15
+          readinessProbe:
+            exec:
+              command: ["redis-cli", "ping"]
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          volumeMounts:
+            - name: data
+              mountPath: /data
+  # each pod gets its own PVC for /data (state persists across restarts)
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        resources:
+          requests:
+            storage: 1Gi

@@ -1,0 +1,26 @@
+# Child app (wave 1): Redis — the shared state store.
+#
+# wave 1 = the "stateful services" layer, alongside the monitoring stack, after
+# secrets (wave 0-1) but before the model/gateway/agent that depend on it.
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: redis
+  namespace: argocd
+  annotations:
+    argocd.argoproj.io/sync-wave: "1"
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: finbot
+  source:
+    repoURL: "https://github.com/vin-ML-dev/finbot-mlops.git"
+    targetRevision: main
+    path: deploy/base/redis
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: finbot
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true

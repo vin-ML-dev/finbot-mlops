@@ -1,0 +1,35 @@
+# Headless service — required by the StatefulSet for stable per-pod DNS
+# (redis-0.redis.finbot.svc). clusterIP: None makes it headless.
+apiVersion: v1
+kind: Service
+metadata:
+  name: redis
+  namespace: finbot
+  labels:
+    app: redis
+spec:
+  clusterIP: None
+  selector:
+    app: redis
+  ports:
+    - name: redis
+      port: 6379
+      targetPort: 6379
+---
+# Normal ClusterIP service clients connect to by name (redis-svc:6379).
+# The gateway and agent use THIS name — matches the Day 1-7 convention.
+apiVersion: v1
+kind: Service
+metadata:
+  name: redis-svc
+  namespace: finbot
+  labels:
+    app: redis
+spec:
+  selector:
+    app: redis
+  ports:
+    - name: redis
+      port: 6379
+      targetPort: 6379
+  type: ClusterIP

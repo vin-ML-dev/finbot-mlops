@@ -1,0 +1,45 @@
+# Child app (wave 1): the monitoring stack — Prometheus + Alertmanager + Grafana.
+#
+# Uses a MULTI-SOURCE Application: the Helm chart comes from the
+# prometheus-community repo, but the values file lives in YOUR git repo
+# (helm/kube-prometheus-stack/values-kind.yaml). The `$values` ref wires them
+# together — so you version your config in Git while pulling the upstream chart.
+#
+# wave 1 = same "stateful services + monitoring" layer as Redis. It must exist
+# before the model/gateway/agent (later waves) so they have somewhere to send
+# metrics. It also creates nothing in `monitoring` that the alertmanager-slack
+# secret needs first — the namespace is created by its own app (wave 0).
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: monitoring
+  namespace: argocd
+  annotations:
+    argocd.argoproj.io/sync-wave: "1"
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: finbot
+  sources:
+    # 1) the upstream chart
+    - repoURL: "https://prometheus-community.github.io/helm-charts"
+      chart: kube-prometheus-stack
+      targetRevision: "62.7.0"
+      helm:
+        releaseName: kps
+        valueFiles:
+          - $values/helm/kube-prometheus-stack/values-kind.yaml
+    # 2) your repo, referenced as $values so the chart can read the values file
+    - repoURL: "https://github.com/vin-ML-dev/finbot-mlops.git"
+      targetRevision: main
+      ref: values
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: monitoring
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=true
+      - ServerSideApply=true      # the kube-prometheus CRDs are large; SSA avoids the annotation size limit

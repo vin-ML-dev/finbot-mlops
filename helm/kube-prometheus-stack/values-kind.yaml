@@ -1,0 +1,98 @@
+# kube-prometheus-stack values tuned for a local 3-node kind cluster.
+# Carries forward the hard-won settings from the earlier monitoring work:
+#   - fullnameOverride: kps  -> predictable service names (kps-prometheus, kps-alertmanager)
+#   - selectors set to false -> Prometheus picks up OUR ServiceMonitors/Rules (added in component 7)
+#   - defaultRules.create: false -> kills the built-in noisy rules (KubeApiErrorBudgetBurn, Watchdog…)
+#   - trimmed resources/retention -> fits a laptop; Grafana capped so it doesn't OOM
+#
+# fullnameOverride makes every resource name start with "kps", so:
+#   Prometheus  service -> kps-prometheus       (port-forward THIS, not *-operated)
+#   Alertmanager service -> kps-alertmanager
+fullnameOverride: kps
+
+# ---- kill the built-in rule noise (CRITICAL — top level) ----
+defaultRules:
+  create: false
+
+# ---- let Prometheus discover OUR ServiceMonitors + PrometheusRules ----
+# Without these it only watches resources with the Helm release's own labels,
+# and ignores the ones component 7 adds.
+prometheus:
+  prometheusSpec:
+    serviceMonitorSelectorNilUsesHelmValues: false
+    ruleSelectorNilUsesHelmValues: false
+    podMonitorSelectorNilUsesHelmValues: false
+    probeSelectorNilUsesHelmValues: false
+    retention: 6h
+    resources:
+      requests: { cpu: "100m", memory: "400Mi" }
+      limits:   { memory: "900Mi" }
+    # prefer the infra node (Node A), tolerate nothing special (Node A untainted)
+    affinity:
+      nodeAffinity:
+        preferredDuringSchedulingIgnoredDuringExecution:
+          - weight: 100
+            preference:
+              matchExpressions:
+                - key: node-role
+                  operator: In
+                  values: ["infra"]
+    # single replica on kind
+    replicas: 1
+
+# ---- Alertmanager ----
+alertmanager:
+  alertmanagerSpec:
+    replicas: 1
+    resources:
+      requests: { cpu: "25m", memory: "64Mi" }
+      limits:   { memory: "128Mi" }
+    affinity:
+      nodeAffinity:
+        preferredDuringSchedulingIgnoredDuringExecution:
+          - weight: 100
+            preference:
+              matchExpressions:
+                - key: node-role
+                  operator: In
+                  values: ["infra"]
+    # the Slack webhook secret (sealed in component 2) mounted for the receiver.
+    # This makes the alertmanager-slack secret's `webhook` key available at
+    # /etc/alertmanager/secrets/alertmanager-slack/webhook (used in component 7).
+    secrets:
+      - alertmanager-slack
+
+# ---- Grafana: capped so it doesn't OOM on a laptop ----
+grafana:
+  enabled: true
+  resources:
+    requests: { cpu: "25m", memory: "128Mi" }
+    limits:   { memory: "512Mi" }     # 384Mi OOMs; 512Mi is stable
+  affinity:
+    nodeAffinity:
+      preferredDuringSchedulingIgnoredDuringExecution:
+        - weight: 100
+          preference:
+            matchExpressions:
+              - key: node-role
+                operator: In
+                values: ["infra"]
+  # default admin password; change for anything real
+  adminPassword: admin
+
+# ---- trim the node/kubelet exporters we don't need noisy on kind ----
+nodeExporter:
+  enabled: true
+kubeStateMetrics:
+  enabled: true
+
+# kind's control-plane components aren't scrapeable the same way as a real
+# cluster; disable the control-plane service monitors that just error on kind.
+kubeControllerManager:
+  enabled: false
+kubeScheduler:
+  enabled: false
+kubeProxy:
+  enabled: false
+kubeEtcd:
+  enabled: false

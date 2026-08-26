@@ -1,6 +1,6 @@
-# Finbot MLOps — Components 0 to 3
+# Finbot MLOps — Components 0 to 5
 
-This project builds the local Kubernetes foundation for Finbot, enables GitOps deployments with Argo CD, protects secrets in Git, and provides Redis as a shared state store.
+This project builds the local Kubernetes foundation for Finbot, enables GitOps deployments with Argo CD, protects secrets in Git, provides Redis as a shared state store, runs the Prometheus monitoring stack, and serves a fine-tuned model with llama.cpp.
 
 ## Components
 
@@ -29,7 +29,7 @@ root application
   -> Argo CD deploys those manifests to Kubernetes
 ```
 
-Component 1 initially creates the `finbot` namespace. The root Application then discovers the Sealed Secrets and Redis child Applications from Git.
+Component 1 initially creates the `finbot` namespace. The root Application then discovers the remaining child Applications from Git.
 
 ### Component 2 — Sealed Secrets
 
@@ -67,14 +67,48 @@ It runs as a one-replica StatefulSet with:
 
 This setup is persistent but not highly available. Production HA would require replication and automatic failover.
 
+### Component 4 — Monitoring stack
+
+The `kube-prometheus-stack` Helm chart provides Prometheus, Alertmanager and (optionally) Grafana in a dedicated `monitoring` namespace.
+
+The component contains two Argo CD Applications:
+
+- `monitoring-namespace` (sync-wave 0) creates the `monitoring` namespace first, so both the stack and the deferred Alertmanager Secret have somewhere to land.
+- `monitoring` (sync-wave 1) installs the chart through a multi-source Application: the chart comes from the `prometheus-community` Helm repository, while the values file lives in this repository at `helm/kube-prometheus-stack/values-kind.yaml` and is referenced with `$values`.
+
+The values file carries the settings tuned for local kind:
+
+- `fullnameOverride: kps` gives predictable service names (`kps-prometheus`, `kps-alertmanager`).
+- `defaultRules.create: false` disables the noisy built-in alert rules.
+- The ServiceMonitor and rule selectors are set so Prometheus also discovers this project's own ServiceMonitors and rules.
+- Grafana is capped and can be disabled to save memory.
+- The Alertmanager Slack Secret is mounted for the receiver used in Component 7.
+
+Creating the `monitoring` namespace also lets the previously deferred Alertmanager Slack SealedSecret decrypt.
+
+### Component 5 — Model serving
+
+The fine-tuned model runs with llama.cpp on the model node (Node B).
+
+It runs as a Deployment with:
+
+- An init container that downloads the GGUF once into a PersistentVolumeClaim and skips the download if the file already exists, so a pod or node restart reuses the cache
+- Node pinning to Node B: `nodeSelector: node-role=model` plus a toleration for the `dedicated=model` taint
+- The `Recreate` strategy, because the model cache PVC is ReadWriteOnce and cannot be shared during a rolling update
+- A generous startup probe, because loading the model is slow
+- CPU-only inference tuned for local testing (`--ctx-size 1024`, `--threads 2`)
+- A ClusterIP Service `llama-cpp-svc:8080` and a ServiceMonitor exposing `/metrics`
+
 ### Where you stand now
 
-You have a working foundation:
+You have a working platform foundation and serving model:
 
 - ✅ Component 0 — 3-node cluster
 - ✅ Component 1 — Argo CD GitOps
 - ✅ Component 2 — Sealed Secrets controller and decrypted Kubernetes Secrets
 - ✅ Component 3 — Redis stateful store
+- ✅ Component 4 — Monitoring stack (Prometheus and Alertmanager)
+- ✅ Component 5 — Model serving with llama.cpp
 
 ## Repository structure
 
@@ -96,7 +130,10 @@ finbot-mlops/
 │   │   ├── namespace.yaml
 │   │   ├── sealed-secrets-controller.yaml
 │   │   ├── sealed-secret-manifests.yaml
-│   │   └── redis.yaml
+│   │   ├── redis.yaml
+│   │   ├── monitoring-namespace.yaml
+│   │   ├── monitoring.yaml
+│   │   └── model.yaml
 │   ├── bootstrap/
 │   │   ├── install.sh
 │   │   ├── root-app.yaml
@@ -107,16 +144,28 @@ finbot-mlops/
 │   ├── seal-secret.sh
 │   └── sealed/
 │       └── kustomization.yaml
+├── helm/
+│   └── kube-prometheus-stack/
+│       └── values-kind.yaml
 └── deploy/base/
     ├── namespace/
     │   ├── kustomization.yaml
     │   └── namespace.yaml
     ├── sealed-secrets/
     │   └── controller.yaml
-    └── redis/
+    ├── redis/
+    │   ├── kustomization.yaml
+    │   ├── service.yaml
+    │   └── statefulset.yaml
+    ├── monitoring-namespace/
+    │   ├── kustomization.yaml
+    │   └── namespace.yaml
+    └── model/
         ├── kustomization.yaml
+        ├── pvc.yaml
+        ├── deployment.yaml
         ├── service.yaml
-        └── statefulset.yaml
+        └── servicemonitor.yaml
 ```
 
 ## Prerequisites
@@ -300,14 +349,6 @@ rm /tmp/gateway-secret.yaml
 cd ..
 ```
 
-If your plaintext files are stored in the project-level `tmp/` folder, run from `secrets/`:
-
-```bash
-./seal-secret.sh ../../tmp/model-secret.yaml sealed/model-sealed.yaml
-./seal-secret.sh ../../tmp/agent-secret.yaml sealed/agent-sealed.yaml
-./seal-secret.sh ../../tmp/gateway-secret.yaml sealed/gateway-sealed.yaml
-```
-
 Do not seal the Alertmanager Slack Secret yet. It targets the `monitoring` namespace, which arrives with Component 4.
 
 List encrypted files in `secrets/sealed/kustomization.yaml`. Use a YAML list, not `resources: []` followed by list items:
@@ -384,6 +425,143 @@ The final command should return:
 hello
 ```
 
+## Component 4 — Deploy the monitoring stack
+
+Re-enable the deferred Alertmanager Slack Secret now that the `monitoring` namespace will exist. Uncomment its line in `secrets/sealed/kustomization.yaml`:
+
+```yaml
+resources:
+  - model-sealed.yaml
+  - gateway-sealed.yaml
+  - agent-sealed.yaml
+  - alertmanager-slack-sealed.yaml
+```
+
+If you recreated the cluster since sealing, re-seal the Alertmanager Secret against the `monitoring` namespace.
+
+Confirm the AppProject allows the `prometheus-community` Helm repository and the admission webhook resources the chart installs. The `clusterResourceWhitelist` must include:
+
+```yaml
+- group: admissionregistration.k8s.io
+  kind: MutatingWebhookConfiguration
+- group: admissionregistration.k8s.io
+  kind: ValidatingWebhookConfiguration
+```
+
+Push the monitoring manifests and Applications:
+
+```bash
+git add helm/ deploy/base/monitoring-namespace/ \
+        argocd/apps/monitoring.yaml argocd/apps/monitoring-namespace.yaml \
+        argocd/projects/finbot-project.yaml \
+        secrets/sealed/kustomization.yaml
+git commit -m "Component 4: monitoring stack"
+git push
+
+# Project changes require a manual apply.
+kubectl apply -f argocd/projects/finbot-project.yaml
+
+kubectl -n argocd patch application finbot-root --type merge \
+  -p '{"metadata":{"annotations":{"argocd.argoproj.io/refresh":"hard"}}}'
+```
+
+The stack is large; the first sync installs CRDs and several pods and takes a few minutes.
+
+Verify:
+
+```bash
+kubectl -n argocd get application monitoring \
+  -o jsonpath='{.status.sync.status} {.status.health.status}{"\n"}'
+
+kubectl get namespace monitoring
+kubectl -n monitoring get pods
+kubectl -n monitoring get secret alertmanager-slack
+```
+
+Expected:
+
+- `monitoring` Application: `Synced Healthy`
+- Prometheus and Alertmanager pods `Running`
+- The `alertmanager-slack` Secret present in the `monitoring` namespace
+
+Reach the user interfaces. Use the `kps-` service names:
+
+```bash
+kubectl -n monitoring port-forward svc/kps-prometheus 9090:9090     # http://localhost:9090
+kubectl -n monitoring port-forward svc/kps-alertmanager 9093:9093   # http://localhost:9093
+```
+
+> Grafana is the heaviest single component and is not in the alert path. On a memory-constrained laptop, set `grafana.enabled: false` in `helm/kube-prometheus-stack/values-kind.yaml` to reclaim memory for the model. Prometheus and Alertmanager continue to provide the reliable alert path.
+
+## Component 5 — Deploy the model
+
+Confirm the GGUF filename matches your Hugging Face file. The default expects `finbot-qwen3-1.7b-baseline-q8_0.gguf`. It appears in two places in `deploy/base/model/deployment.yaml`: the init container's `MODEL_FILE` value and the server's `-m` argument.
+
+```bash
+grep -n "gguf" deploy/base/model/deployment.yaml   # both lines must match your file name
+```
+
+Push the model manifests and child Application:
+
+```bash
+git add deploy/base/model/ argocd/apps/model.yaml
+git commit -m "Component 5: model server"
+git push
+
+kubectl -n argocd patch application finbot-root --type merge \
+  -p '{"metadata":{"annotations":{"argocd.argoproj.io/refresh":"hard"}}}'
+```
+
+Watch the first run. It downloads roughly 2 GB, then loads the model, so it is slow:
+
+```bash
+kubectl -n finbot get pods -l app=llama-cpp -o wide       # should land on the model node
+kubectl -n finbot logs -l app=llama-cpp -c fetch-model    # download progress (first run only)
+kubectl -n finbot logs -l app=llama-cpp -c llama-cpp      # server loading the model
+```
+
+The server logs should show `model loaded` and `listening on http://0.0.0.0:8080`.
+
+Verify:
+
+```bash
+kubectl -n argocd get application model \
+  -o jsonpath='{.status.sync.status} {.status.health.status}{"\n"}'
+
+kubectl -n finbot get pods -l app=llama-cpp     # 1/1 Running
+kubectl -n finbot get pvc model-cache           # Bound
+```
+
+Expected:
+
+- `model` Application: `Synced Healthy`
+- Pod `1/1 Running` on the model node
+- PVC `model-cache` in `Bound` state
+
+> If the Application briefly shows `Degraded` while the model downloads and loads, that is expected; it clears when the startup probe passes. If it stays `Degraded` after the pod is `1/1 Running`, force a refresh or restart the Argo CD application controller.
+
+### Test the model API
+
+Port 8080 on the host is used by kind, so forward to a different local port and force IPv4:
+
+```bash
+kubectl -n finbot port-forward --address 127.0.0.1 svc/llama-cpp-svc 9080:8080
+```
+
+In another terminal:
+
+```bash
+curl http://127.0.0.1:9080/v1/models
+
+curl http://127.0.0.1:9080/v1/chat/completions \
+  -H 'Content-Type: application/json' \
+  -d '{"messages":[{"role":"user","content":"Say hello in 3 words."}],"max_tokens":16}'
+```
+
+A generated reply confirms the model is serving.
+
+> If curl reports `Connection reset by peer` with `localhost`, it is an IPv4/IPv6 mismatch. Use `--address 127.0.0.1` on the port-forward as above, or query the IPv6 form: `curl http://[::1]:9080/v1/models`.
+
 ## Useful Argo CD commands
 
 ### Force an Application to refresh now
@@ -413,13 +591,13 @@ kubectl -n argocd get application <app-name> \
 
 For an existing component:
 
-1. Change its manifests under `deploy/`.
+1. Change its manifests under `deploy/` or its Helm values.
 2. Commit and push.
 3. Argo CD detects and deploys the change.
 
 For a new component:
 
-1. Add its manifests under `deploy/`.
+1. Add its manifests under `deploy/` or its Helm configuration.
 2. Add its child Application under `argocd/apps/`.
 3. Commit and push.
 4. Argo CD registers and deploys it.
@@ -435,17 +613,18 @@ cd infra/terraform
 terraform destroy -auto-approve
 ```
 
-A new cluster has no Argo CD installation and receives a new Sealed Secrets key. To start again, repeat Components 0 through 3 and re-seal the secrets.
+A new cluster has no Argo CD installation and receives a new Sealed Secrets key. To start again, repeat Components 0 through 5 and re-seal the secrets.
 
 ### Recovery when Terraform destroy fails
 
-Use this only for a broken kind cluster that Terraform cannot destroy normally:
+Use this only for a broken kind cluster that Terraform cannot destroy normally, or when worker containers show `Dead`:
 
 ```bash
 kind delete cluster --name finbot
 docker ps -a --filter "label=io.x-k8s.kind.cluster=finbot" -q \
   | xargs -r docker rm -f
 terraform state rm kind_cluster.finbot 2>/dev/null
+docker system prune -f
 terraform apply -auto-approve
 ```
 
@@ -460,17 +639,28 @@ The final `terraform apply` recreates the cluster; it is not part of deletion-on
 | All Argo CD pods remain `Pending` | Remove the control-plane `NoSchedule` taint. |
 | `terraform destroy` fails while removing Docker containers | Use the broken-cluster recovery commands above. |
 | Terraform reports that nodes already exist | Remove leftover kind containers before applying again. |
+| Worker nodes go `NotReady` or containers show `Dead` | Memory or disk pressure; give Docker at least 12 GB, run `docker system prune -f`, and recreate. |
 | Sealed Secrets chart returns `404` or OCI `403` | Use the vendored static controller manifest instead of Helm/OCI. |
 | Kustomize reports `did not find expected key` | Replace `resources: []` with a normal YAML resource list. |
 | Argo CD still shows an old commit | Hard-refresh the Application or use Refresh in the UI. |
 | `sealed-secret-manifests` is `OutOfSync` | Keep the Alertmanager Secret disabled until the `monitoring` namespace exists. |
 | `redis-0` remains `Pending` | Check `kubectl get storageclass`; kind normally provides the `standard` StorageClass. |
+| Monitoring Application is `Unknown` with a chart fetch error | Allow the `prometheus-community` repository in the AppProject. |
+| Monitoring sync rejected for webhook resources | Add `MutatingWebhookConfiguration` and `ValidatingWebhookConfiguration` to the AppProject `clusterResourceWhitelist`. |
+| Grafana `CrashLoopBackOff` or OOM | Raise its memory limit above 512Mi, or set `grafana.enabled: false`. |
+| Monitoring port-forward reports `service not found` | Use the `kps-` service names, not `*-operated`. |
+| `model` Application stays `Degraded` after the pod is `Running` | Stale health; hard-refresh, or run `kubectl -n argocd rollout restart statefulset argocd-application-controller`. |
+| curl reports `Connection reset by peer` on localhost | IPv4/IPv6 mismatch; use `--address 127.0.0.1` on the port-forward, or curl `http://[::1]:PORT`. |
+| Local port 8080 already in use | It is the kind port mapping; forward to a different local port such as `9080:8080`. |
+| model pod remains `Pending` | The model node is `NotReady`, or the PVC cannot bind; check the nodes and the StorageClass. |
 
-## Done through Component 3
+## Done through Component 5
 
 - Three nodes are `Ready`: infra control-plane without a taint, model and agent workers with `dedicated` taints.
-- Argo CD Applications are `Synced` and `Healthy`, except the intentionally deferred Alertmanager Secret.
+- Argo CD Applications are `Synced` and `Healthy`.
 - `kubectl -n finbot get secrets` lists decrypted gateway, model and agent Secrets.
 - `redis-0` is running on the infra node, its PVC is `Bound`, and `redis-cli ping` returns `PONG`.
+- Prometheus and Alertmanager are running in the `monitoring` namespace, and the Alertmanager Slack Secret has decrypted.
+- The model pod is `1/1 Running` on the model node, its cache PVC is `Bound`, and `/v1/chat/completions` returns generated text.
 
-Next: **Component 4 — monitoring** with Prometheus, Alertmanager and Grafana. It creates the `monitoring` namespace and allows the deferred Alertmanager Secret to decrypt.
+Next: **Component 6 — API gateway**, the policy and resilience layer in front of the model, with authentication, rate limiting, caching, timeouts, bounded retries and a circuit breaker.

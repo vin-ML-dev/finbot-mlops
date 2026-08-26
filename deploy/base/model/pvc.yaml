@@ -1,0 +1,15 @@
+# PersistentVolumeClaim for the model cache. The GGUF is downloaded ONCE into
+# this volume (by the initContainer) and reused on every pod/node restart — the
+# volume outlives the pod. ~3Gi = the ~2GB q8 model + headroom.
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: model-cache
+  namespace: finbot
+  labels:
+    app: llama-cpp
+spec:
+  accessModes: ["ReadWriteOnce"]
+  resources:
+    requests:
+      storage: 3Gi

@@ -1,0 +1,28 @@
+# Child app (wave 2): the model server.
+#
+# wave 2 = after secrets/redis/monitoring (waves 0-1), before the gateway
+# (wave 3) which depends on the model being reachable. The model is the slowest
+# to become ready (downloads + loads the GGUF), so giving it its own earlier
+# wave lets it get a head start.
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: model
+  namespace: argocd
+  annotations:
+    argocd.argoproj.io/sync-wave: "2"
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: finbot
+  source:
+    repoURL: "https://github.com/vin-ML-dev/finbot-mlops.git"
+    targetRevision: main
+    path: deploy/base/model
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: finbot
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true

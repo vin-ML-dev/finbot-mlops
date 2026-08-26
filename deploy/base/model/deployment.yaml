@@ -1,0 +1,121 @@
+# llama.cpp model server — Node B (the heavy, isolated workload).
+#
+# Key production behaviors:
+#   - initContainer downloads the GGUF ONCE into the PVC (skip-if-exists), so a
+#     pod/node restart reuses the cached model instead of re-downloading ~2GB.
+#   - pinned to Node B: nodeSelector node-role=model + toleration for the
+#     dedicated=model taint (so it's ALLOWED onto the otherwise-fenced node).
+#   - Recreate strategy: the PVC is ReadWriteOnce, so two pods can't mount it at
+#     once during a rolling update — Recreate stops the old before starting new.
+#   - generous startupProbe: the model load is slow; don't let liveness kill it
+#     before it's ready.
+#   - CPU-only inference (kind has no GPU): --ctx-size 1024 --threads 2 keeps RAM
+#     modest for local testing. Raise ctx-size for real use.
+#
+# CHANGE ME if your GGUF filename differs: the initContainer's MODEL_FILE var.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: llama-cpp
+  namespace: finbot
+  labels:
+    app: llama-cpp
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate            # RWO PVC can't be shared across a rolling update
+  selector:
+    matchLabels:
+      app: llama-cpp
+  template:
+    metadata:
+      labels:
+        app: llama-cpp
+    spec:
+      # --- pin to Node B (model) ---
+      nodeSelector:
+        node-role: model
+      tolerations:
+        - key: "dedicated"
+          operator: "Equal"
+          value: "model"
+          effect: "NoSchedule"
+      terminationGracePeriodSeconds: 120   # let in-flight requests drain
+
+      # --- download the GGUF once into the PVC (skip if already there) ---
+      initContainers:
+        - name: fetch-model
+          image: curlimages/curl:8.9.1
+          env:
+            - name: MODEL_REPO
+              value: "vinmlops/finbot-qwen3-1.7b-gguf"
+            - name: MODEL_FILE
+              value: "finbot-qwen3-1.7b-baseline-q8_0.gguf"   # <-- CHANGE if your file is named differently
+            # Public repo: no token needed. If you make the repo PRIVATE, uncomment
+            # this and the download adds an auth header from the sealed secret.
+            # - name: HF_TOKEN
+            #   valueFrom:
+            #     secretKeyRef: { name: model-secret, key: HF_TOKEN }
+          command: ["/bin/sh", "-c"]
+          args:
+            - |
+              set -e
+              DEST="/models/${MODEL_FILE}"
+              if [ -f "${DEST}" ]; then
+                echo "model already cached at ${DEST} — skipping download"
+                exit 0
+              fi
+              echo "downloading ${MODEL_FILE} from ${MODEL_REPO} ..."
+              URL="https://huggingface.co/${MODEL_REPO}/resolve/main/${MODEL_FILE}?download=true"
+              # public repo download; add -H "Authorization: Bearer ${HF_TOKEN}" if private
+              curl -fSL --retry 3 -o "${DEST}.part" "${URL}"
+              mv "${DEST}.part" "${DEST}"
+              echo "download complete: $(ls -lh ${DEST})"
+          volumeMounts:
+            - name: model-cache
+              mountPath: /models
+
+      # --- the model server ---
+      containers:
+        - name: llama-cpp
+          image: ghcr.io/ggml-org/llama.cpp:server
+          args:
+            - "-m"
+            - "/models/finbot-qwen3-1.7b-baseline-q8_0.gguf"   # <-- CHANGE to match MODEL_FILE
+            - "--host"
+            - "0.0.0.0"
+            - "--port"
+            - "8080"
+            - "--ctx-size"
+            - "1024"
+            - "--threads"
+            - "2"
+            - "--metrics"                # exposes Prometheus /metrics
+          ports:
+            - name: http
+              containerPort: 8080
+          resources:
+            requests: { cpu: "500m", memory: "1500Mi" }
+            limits:   { memory: "3Gi" }
+          # model load is slow — startupProbe guards the slow start; only after it
+          # passes do liveness/readiness take over.
+          startupProbe:
+            httpGet: { path: /health, port: 8080 }
+            periodSeconds: 10
+            failureThreshold: 30         # up to ~5 min to load
+          livenessProbe:
+            httpGet: { path: /health, port: 8080 }
+            periodSeconds: 15
+            failureThreshold: 4
+          readinessProbe:
+            httpGet: { path: /health, port: 8080 }
+            periodSeconds: 10
+            failureThreshold: 3
+          volumeMounts:
+            - name: model-cache
+              mountPath: /models
+              readOnly: true             # server only reads the model
+      volumes:
+        - name: model-cache
+          persistentVolumeClaim:
+            claimName: model-cache

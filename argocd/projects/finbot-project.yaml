@@ -49,6 +49,10 @@ spec:
       kind: "*"
     - group: bitnami.com
       kind: "*"
+    - group: admissionregistration.k8s.io      # ← ADD: the monitoring stack's webhooks
+      kind: MutatingWebhookConfiguration        # ←
+    - group: admissionregistration.k8s.io      # ←
+      kind: ValidatingWebhookConfiguration      # ←
 
   # Namespaced resources are unrestricted within the allowed namespaces.
   namespaceResourceWhitelist:

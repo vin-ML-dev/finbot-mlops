@@ -1,0 +1,63 @@
+# API gateway — the policy-and-resilience layer in front of the model.
+#
+# Unlike the model (hard-pinned to Node B), the gateway is STATELESS and should
+# be SPREAD across nodes for resilience — losing one node loses one replica, not
+# the whole front door. topologySpreadConstraints do that; an HPA scales it.
+#
+# IMAGE: replace with your built + pushed gateway image. The CI pipeline
+# (later) tags it with the commit SHA and writes the digest here.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: gateway
+  namespace: finbot
+  labels:
+    app: gateway
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: gateway
+  template:
+    metadata:
+      labels:
+        app: gateway
+    spec:
+      # spread replicas across nodes (soft) so they don't pile onto one node
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: kubernetes.io/hostname
+          whenUnsatisfiable: ScheduleAnyway
+          labelSelector:
+            matchLabels:
+              app: gateway
+      # the gateway is fine on the infra node or any untainted node; it does NOT
+      # tolerate the model/agent taints, so it stays off Node B and Node C.
+      containers:
+        - name: gateway
+          image: ghcr.io/vin-ml-dev/finbot-gateway:latest   # <-- replace with your image
+          ports:
+            - name: http
+              containerPort: 8000
+          env:
+            - name: MODEL_BASE_URL
+              value: "http://llama-cpp-svc:8080"
+            - name: REDIS_URL
+              value: "redis://redis-svc:6379/0"
+            # the gateway API key from the sealed gateway-secret (component 2)
+            - name: GATEWAY_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: gateway-secret
+                  key: GATEWAY_API_KEY
+          resources:
+            requests: { cpu: "50m", memory: "128Mi" }
+            limits:   { memory: "256Mi" }
+          livenessProbe:
+            httpGet: { path: /healthz, port: 8000 }
+            initialDelaySeconds: 5
+            periodSeconds: 15
+          readinessProbe:
+            httpGet: { path: /readyz, port: 8000 }
+            initialDelaySeconds: 5
+            periodSeconds: 10

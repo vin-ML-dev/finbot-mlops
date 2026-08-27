@@ -1,0 +1,16 @@
+# The gateway is the front door — clients hit this, never the model directly.
+apiVersion: v1
+kind: Service
+metadata:
+  name: fastapi-gateway-svc
+  namespace: finbot
+  labels:
+    app: gateway
+spec:
+  selector:
+    app: gateway
+  ports:
+    - name: http
+      port: 8000
+      targetPort: 8000
+  type: ClusterIP

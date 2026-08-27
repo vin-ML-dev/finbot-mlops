@@ -1,0 +1,18 @@
+# Prometheus scrapes the gateway's /metrics (release: kps selects it).
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: gateway
+  namespace: finbot
+  labels:
+    release: kps
+spec:
+  selector:
+    matchLabels:
+      app: gateway
+  namespaceSelector:
+    matchNames: [finbot]
+  endpoints:
+    - port: http
+      path: /metrics
+      interval: 30s

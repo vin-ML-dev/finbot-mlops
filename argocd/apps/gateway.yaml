@@ -1,0 +1,27 @@
+# Child app (wave 3): the API gateway.
+#
+# wave 3 = after the model (wave 2), because the gateway's readiness depends on
+# reaching the model. Deploying it after the model means it comes up into a world
+# where its upstream already exists.
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: gateway
+  namespace: argocd
+  annotations:
+    argocd.argoproj.io/sync-wave: "3"
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: finbot
+  source:
+    repoURL: "https://github.com/vin-ML-dev/finbot-mlops.git"
+    targetRevision: main
+    path: deploy/base/gateway
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: finbot
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true

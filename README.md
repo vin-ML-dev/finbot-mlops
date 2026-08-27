@@ -1,6 +1,6 @@
-# Finbot MLOps — Components 0 to 5
+# Finbot MLOps — Components 0 to 6
 
-This project builds the local Kubernetes foundation for Finbot, enables GitOps deployments with Argo CD, protects secrets in Git, provides Redis as a shared state store, runs the Prometheus monitoring stack, and serves a fine-tuned model with llama.cpp.
+This project builds the local Kubernetes foundation for Finbot, enables GitOps deployments with Argo CD, protects secrets in Git, provides Redis as a shared state store, runs the Prometheus monitoring stack, and serves a fine-tuned model with llama.cpp, and fronts it with a resilient API gateway.
 
 ## Components
 
@@ -99,6 +99,26 @@ It runs as a Deployment with:
 - CPU-only inference tuned for local testing (`--ctx-size 1024`, `--threads 2`)
 - A ClusterIP Service `llama-cpp-svc:8080` and a ServiceMonitor exposing `/metrics`
 
+### Component 6 — API gateway
+
+The gateway is the front door to the model and a policy-and-resilience layer, not a second inference engine. Clients call the gateway; nothing talks to the model directly.
+
+It enforces policy:
+
+- Authentication with a Bearer key checked against the sealed `GATEWAY_API_KEY`
+- Request validation, including a `max_tokens` cap and a prompt-size limit
+- Per-client rate limiting with counters in Redis
+- Response caching in Redis
+
+It provides resilience:
+
+- Timeouts so a slow model does not hang the gateway
+- Bounded retries for transient upstream errors
+- A circuit breaker that fails fast when the model is unhealthy and recovers after a cooldown
+- Clean JSON errors instead of stack traces
+
+Deployment shape differs from the model. The gateway is stateless, so it is spread across nodes rather than pinned, runs two replicas, and scales with a Horizontal Pod Autoscaler. Its code lives in `services/gateway/`, it is exposed as `fastapi-gateway-svc:8000`, and a ServiceMonitor exposes `/metrics`.
+
 ### Where you stand now
 
 You have a working platform foundation and serving model:
@@ -109,6 +129,7 @@ You have a working platform foundation and serving model:
 - ✅ Component 3 — Redis stateful store
 - ✅ Component 4 — Monitoring stack (Prometheus and Alertmanager)
 - ✅ Component 5 — Model serving with llama.cpp
+- ✅ Component 6 — API gateway (policy and resilience layer)
 
 ## Repository structure
 
@@ -133,7 +154,8 @@ finbot-mlops/
 │   │   ├── redis.yaml
 │   │   ├── monitoring-namespace.yaml
 │   │   ├── monitoring.yaml
-│   │   └── model.yaml
+│   │   ├── model.yaml
+│   │   └── gateway.yaml
 │   ├── bootstrap/
 │   │   ├── install.sh
 │   │   ├── root-app.yaml
@@ -144,6 +166,12 @@ finbot-mlops/
 │   ├── seal-secret.sh
 │   └── sealed/
 │       └── kustomization.yaml
+├── services/
+│   └── gateway/
+│       ├── app/
+│       ├── tests/
+│       ├── Dockerfile
+│       └── requirements.txt
 ├── helm/
 │   └── kube-prometheus-stack/
 │       └── values-kind.yaml
@@ -160,11 +188,17 @@ finbot-mlops/
     ├── monitoring-namespace/
     │   ├── kustomization.yaml
     │   └── namespace.yaml
-    └── model/
+    ├── model/
+    │   ├── kustomization.yaml
+    │   ├── pvc.yaml
+    │   ├── deployment.yaml
+    │   ├── service.yaml
+    │   └── servicemonitor.yaml
+    └── gateway/
         ├── kustomization.yaml
-        ├── pvc.yaml
         ├── deployment.yaml
         ├── service.yaml
+        ├── hpa.yaml
         └── servicemonitor.yaml
 ```
 
@@ -562,6 +596,137 @@ A generated reply confirms the model is serving.
 
 > If curl reports `Connection reset by peer` with `localhost`, it is an IPv4/IPv6 mismatch. Use `--address 127.0.0.1` on the port-forward as above, or query the IPv6 form: `curl http://[::1]:9080/v1/models`.
 
+## Component 6 — Deploy the gateway
+
+### Build the image
+
+The gateway runs from a container image built from `services/gateway/`.
+
+```bash
+docker build -t finbot-gateway:local services/gateway
+```
+
+### Load the image into kind
+
+On some Docker setups `kind load` fails with `failed to detect containerd snapshotter`. The reliable workaround is to save the image to a tar and import it directly into the node's containerd:
+
+```bash
+docker save finbot-gateway:local -o /tmp/gateway.tar
+
+docker exec -i finbot-control-plane \
+  ctr --namespace=k8s.io images import \
+  --snapshotter=overlayfs \
+  - < /tmp/gateway.tar
+```
+
+Confirm the image is present and note its exact name:
+
+```bash
+docker exec finbot-control-plane crictl images | grep -i finbot-gateway
+```
+
+Set the deployment to use the local image and never pull it. The image name must match the output above exactly, including the `docker.io/library/` prefix:
+
+```yaml
+# deploy/base/gateway/deployment.yaml
+image: docker.io/library/finbot-gateway:local
+imagePullPolicy: Never
+```
+
+> The sideloaded image does not survive a cluster recreate. On a fresh cluster, rebuild, save and import it again. On real infrastructure you would push to a registry (for example GHCR) and pull normally, which removes this step entirely.
+
+### Install metrics-server (for the HPA)
+
+kind does not ship metrics-server, so the HPA shows `<unknown>` until it is installed:
+
+```bash
+kubectl apply -f https://github.com/kubernetes-sigs/metrics-server/releases/latest/download/components.yaml
+
+kubectl -n kube-system patch deployment metrics-server --type=json \
+  -p='[{"op":"add","path":"/spec/template/spec/containers/0/args/-","value":"--kubelet-insecure-tls"}]'
+```
+
+### Deploy
+
+```bash
+git add services/gateway/ deploy/base/gateway/ argocd/apps/gateway.yaml
+git commit -m "Component 6: API gateway"
+git push
+
+kubectl -n argocd patch application finbot-root --type merge \
+  -p '{"metadata":{"annotations":{"argocd.argoproj.io/refresh":"hard"}}}'
+```
+
+### Verify
+
+```bash
+kubectl -n argocd get application gateway \
+  -o jsonpath='{.status.sync.status} {.status.health.status}{"\n"}'
+
+kubectl -n finbot get pods -l app=gateway -o wide      # two replicas, not on the model or agent node
+kubectl -n finbot rollout status deploy/gateway
+kubectl -n finbot get hpa gateway                      # TARGETS shows a real cpu percentage once metrics-server is up
+```
+
+Expected:
+
+- `gateway` Application: `Synced Healthy`
+- Two gateway pods `1/1 Running`
+- HPA target such as `cpu: 17%/70%` rather than `<unknown>`
+
+### Test through the gateway
+
+```bash
+KEY=$(kubectl -n finbot get secret gateway-secret -o jsonpath='{.data.GATEWAY_API_KEY}' | base64 -d)
+
+kubectl -n finbot port-forward --address 127.0.0.1 svc/fastapi-gateway-svc 8000:8000
+```
+
+In another terminal:
+
+```bash
+curl http://127.0.0.1:8000/healthz          # {"status":"ok"}
+curl http://127.0.0.1:8000/readyz           # {"status":"ready","redis":true}
+
+# a real completion through the gateway (needs the model running)
+curl http://127.0.0.1:8000/v1/chat/completions \
+  -H "Authorization: Bearer $KEY" \
+  -H 'Content-Type: application/json' \
+  -d '{"messages":[{"role":"user","content":"Say hello in 3 words."}],"max_tokens":16}'
+
+# policy checks
+#   omit the Authorization header -> 401
+#   many fast requests            -> eventually 429
+#   repeat the same request       -> response header x-cache: HIT
+```
+
+### Run the unit tests
+
+Run from inside `services/gateway/` so the `app` package is importable:
+
+```bash
+cd services/gateway
+python -m pytest tests/ -q      # auth, validation, retries, circuit breaker
+cd ../..
+```
+
+### Diagnosing resource pressure
+
+kind runs all nodes as containers on one host, so heavy activity can briefly starve the control plane and cause `etcdserver: request timed out`. These are usually transient. Check actual usage before assuming the worst:
+
+```bash
+docker stats --no-stream                          # per-node cpu and memory
+kubectl top pods -A --sort-by=cpu | head -15       # which pod is using cpu (needs metrics-server)
+kubectl get nodes                                  # are nodes still Ready
+```
+
+If usage is low, wait a few seconds and retry the command. To free resources while testing only the gateway, park the model and bring it back later:
+
+```bash
+kubectl -n finbot scale deploy/llama-cpp --replicas=0
+kubectl -n finbot scale deploy/llama-cpp --replicas=1
+```
+
 ## Useful Argo CD commands
 
 ### Force an Application to refresh now
@@ -613,7 +778,7 @@ cd infra/terraform
 terraform destroy -auto-approve
 ```
 
-A new cluster has no Argo CD installation and receives a new Sealed Secrets key. To start again, repeat Components 0 through 5 and re-seal the secrets.
+A new cluster has no Argo CD installation and receives a new Sealed Secrets key. To start again, repeat Components 0 through 6 and re-seal the secrets.
 
 ### Recovery when Terraform destroy fails
 
@@ -630,31 +795,8 @@ terraform apply -auto-approve
 
 The final `terraform apply` recreates the cluster; it is not part of deletion-only cleanup.
 
-## Troubleshooting
-
-| Symptom | Fix |
-| --- | --- |
-| Terraform configuration change is not reflected | Some kind settings apply only during cluster creation; recreate the cluster. |
-| Argo CD install reports `annotations: Too long` | Use `kubectl apply --server-side --force-conflicts`. |
-| All Argo CD pods remain `Pending` | Remove the control-plane `NoSchedule` taint. |
-| `terraform destroy` fails while removing Docker containers | Use the broken-cluster recovery commands above. |
-| Terraform reports that nodes already exist | Remove leftover kind containers before applying again. |
-| Worker nodes go `NotReady` or containers show `Dead` | Memory or disk pressure; give Docker at least 12 GB, run `docker system prune -f`, and recreate. |
-| Sealed Secrets chart returns `404` or OCI `403` | Use the vendored static controller manifest instead of Helm/OCI. |
-| Kustomize reports `did not find expected key` | Replace `resources: []` with a normal YAML resource list. |
-| Argo CD still shows an old commit | Hard-refresh the Application or use Refresh in the UI. |
-| `sealed-secret-manifests` is `OutOfSync` | Keep the Alertmanager Secret disabled until the `monitoring` namespace exists. |
-| `redis-0` remains `Pending` | Check `kubectl get storageclass`; kind normally provides the `standard` StorageClass. |
-| Monitoring Application is `Unknown` with a chart fetch error | Allow the `prometheus-community` repository in the AppProject. |
-| Monitoring sync rejected for webhook resources | Add `MutatingWebhookConfiguration` and `ValidatingWebhookConfiguration` to the AppProject `clusterResourceWhitelist`. |
-| Grafana `CrashLoopBackOff` or OOM | Raise its memory limit above 512Mi, or set `grafana.enabled: false`. |
-| Monitoring port-forward reports `service not found` | Use the `kps-` service names, not `*-operated`. |
-| `model` Application stays `Degraded` after the pod is `Running` | Stale health; hard-refresh, or run `kubectl -n argocd rollout restart statefulset argocd-application-controller`. |
-| curl reports `Connection reset by peer` on localhost | IPv4/IPv6 mismatch; use `--address 127.0.0.1` on the port-forward, or curl `http://[::1]:PORT`. |
-| Local port 8080 already in use | It is the kind port mapping; forward to a different local port such as `9080:8080`. |
-| model pod remains `Pending` | The model node is `NotReady`, or the PVC cannot bind; check the nodes and the StorageClass. |
-
-## Done through Component 5
+ |
+## Done through Component 6
 
 - Three nodes are `Ready`: infra control-plane without a taint, model and agent workers with `dedicated` taints.
 - Argo CD Applications are `Synced` and `Healthy`.
@@ -662,5 +804,5 @@ The final `terraform apply` recreates the cluster; it is not part of deletion-on
 - `redis-0` is running on the infra node, its PVC is `Bound`, and `redis-cli ping` returns `PONG`.
 - Prometheus and Alertmanager are running in the `monitoring` namespace, and the Alertmanager Slack Secret has decrypted.
 - The model pod is `1/1 Running` on the model node, its cache PVC is `Bound`, and `/v1/chat/completions` returns generated text.
+- The gateway runs two replicas across nodes, the HPA reads a real CPU percentage, and a request through the gateway with the API key returns a completion; requests without the key return `401`.
 
-Next: **Component 6 — API gateway**, the policy and resilience layer in front of the model, with authentication, rate limiting, caching, timeouts, bounded retries and a circuit breaker.

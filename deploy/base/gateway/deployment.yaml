@@ -36,8 +36,8 @@ spec:
       # image:ghcr.io/vin-ml-dev/finbot-gateway:latest   # <-- replace with your image
       containers:
         - name: gateway
-          image: finbot-gateway:local   # <-- replace with your image
-          imagePullPolicy: IfNotPresent
+          image: docker.io/library/finbot-gateway:local   # <-- replace with your image
+          imagePullPolicy: Never
           ports:
             - name: http
               containerPort: 8000

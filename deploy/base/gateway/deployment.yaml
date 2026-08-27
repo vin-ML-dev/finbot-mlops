@@ -33,9 +33,11 @@ spec:
               app: gateway
       # the gateway is fine on the infra node or any untainted node; it does NOT
       # tolerate the model/agent taints, so it stays off Node B and Node C.
+      # image:ghcr.io/vin-ml-dev/finbot-gateway:latest   # <-- replace with your image
       containers:
         - name: gateway
-          image: ghcr.io/vin-ml-dev/finbot-gateway:latest   # <-- replace with your image
+          image: finbot-gateway:local   # <-- replace with your image
+          imagePullPolicy: IfNotPresent
           ports:
             - name: http
               containerPort: 8000

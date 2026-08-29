@@ -1,98 +1,124 @@
-# kube-prometheus-stack values tuned for a local 3-node kind cluster.
-# Carries forward the hard-won settings from the earlier monitoring work:
-#   - fullnameOverride: kps  -> predictable service names (kps-prometheus, kps-alertmanager)
-#   - selectors set to false -> Prometheus picks up OUR ServiceMonitors/Rules (added in component 7)
-#   - defaultRules.create: false -> kills the built-in noisy rules (KubeApiErrorBudgetBurn, Watchdog…)
-#   - trimmed resources/retention -> fits a laptop; Grafana capped so it doesn't OOM
-#
-# fullnameOverride makes every resource name start with "kps", so:
-#   Prometheus  service -> kps-prometheus       (port-forward THIS, not *-operated)
-#   Alertmanager service -> kps-alertmanager
+# kube-prometheus-stack Helm values — tuned for the 3-node kind cluster.
+# All nodes share one laptop, so replicas/retention/resources are kept small.
+# The Alertmanager Slack config here is Path 1 (the reliable alerting path);
+# it lives in these values (NOT in a separate AlertmanagerConfig), so there is
+# no operator-injected namespace matcher to block cross-namespace alerts.
+
 fullnameOverride: kps
 
-# ---- kill the built-in rule noise (CRITICAL — top level) ----
+# ---------------------------------------------------------------------------
+# Silence the chart's BUILT-IN Kubernetes alert rules and keep ONLY the finbot
+# rules. On kind these built-ins misfire (KubeAPIErrorBudgetBurn, TargetDown,
+# etc.) because there is no real control plane / API error budget to measure.
+# create: false removes all of them (including the always-firing Watchdog,
+# which is fine locally — nothing external watches it here).
+# ---------------------------------------------------------------------------
 defaultRules:
   create: false
 
-# ---- let Prometheus discover OUR ServiceMonitors + PrometheusRules ----
-# Without these it only watches resources with the Helm release's own labels,
-# and ignores the ones component 7 adds.
+# --- disable control-plane scrape jobs that don't exist on kind (avoids noisy "target down") ---
+kubeControllerManager: { enabled: false }
+kubeScheduler:         { enabled: false }
+kubeProxy:             { enabled: false }
+kubeEtcd:              { enabled: false }
+
+# --- Prometheus (StatefulSet) ---
 prometheus:
   prometheusSpec:
-    serviceMonitorSelectorNilUsesHelmValues: false
-    ruleSelectorNilUsesHelmValues: false
-    podMonitorSelectorNilUsesHelmValues: false
-    probeSelectorNilUsesHelmValues: false
-    retention: 6h
-    resources:
-      requests: { cpu: "100m", memory: "400Mi" }
-      limits:   { memory: "900Mi" }
-    # prefer the infra node (Node A), tolerate nothing special (Node A untainted)
-    affinity:
-      nodeAffinity:
-        preferredDuringSchedulingIgnoredDuringExecution:
-          - weight: 100
-            preference:
-              matchExpressions:
-                - key: node-role
-                  operator: In
-                  values: ["infra"]
-    # single replica on kind
     replicas: 1
+    retention: 6h
+    scrapeInterval: 15s
+    evaluationInterval: 15s
+    # discover OUR ServiceMonitors / PrometheusRules. Our objects DO carry
+    # release=kps, but setting these false also lets Prometheus pick up any
+    # unlabelled ones, which is convenient locally.
+    serviceMonitorSelectorNilUsesHelmValues: false
+    podMonitorSelectorNilUsesHelmValues: false
+    ruleSelectorNilUsesHelmValues: false
+    probeSelectorNilUsesHelmValues: false
+    resources:
+      requests: { cpu: 100m, memory: 400Mi }
+      limits:   { memory: 900Mi }
+    # ephemeral storage on kind (fine to lose locally; avoids PVC hassle)
+    # -> omit storageSpec so it uses emptyDir
 
-# ---- Alertmanager ----
+# ---------------------------------------------------------------------------
+# Alertmanager (StatefulSet) — Path 1: the reliable Slack alerting path.
+#
+# The Slack config is INLINE here (alertmanager.config), not a separate
+# AlertmanagerConfig CRD. This matters: a namespaced AlertmanagerConfig gets an
+# operator-injected `namespace="monitoring"` matcher that silently drops alerts
+# from other namespaces (finbot) and label-less alerts (the absent() dead-man).
+# Inline config has no such matcher, so every alert routes correctly.
+#
+# STATE-AWARE templates: only the template knows .Status, so every bit of
+# firing/resolved wording — the title AND the body — is gated on .Status here.
+# This prevents the "RESOLVED · ...is down" contradiction. Keep each template on
+# one single-quoted line so no stray newlines leak.
+# ---------------------------------------------------------------------------
 alertmanager:
   alertmanagerSpec:
     replicas: 1
     resources:
-      requests: { cpu: "25m", memory: "64Mi" }
-      limits:   { memory: "128Mi" }
-    affinity:
-      nodeAffinity:
-        preferredDuringSchedulingIgnoredDuringExecution:
-          - weight: 100
-            preference:
-              matchExpressions:
-                - key: node-role
-                  operator: In
-                  values: ["infra"]
-    # the Slack webhook secret (sealed in component 2) mounted for the receiver.
-    # This makes the alertmanager-slack secret's `webhook` key available at
-    # /etc/alertmanager/secrets/alertmanager-slack/webhook (used in component 7).
+      requests: { cpu: 25m, memory: 64Mi }
+      limits:   { memory: 128Mi }
+    # mount the sealed Slack webhook at
+    # /etc/alertmanager/secrets/alertmanager-slack/webhook
     secrets:
       - alertmanager-slack
+  config:
+    global:
+      resolve_timeout: 5m
+    route:
+      receiver: slack-default
+      group_by: ["alertname", "severity", "namespace"]
+      group_wait: 30s          # batch related alerts before the first send
+      group_interval: 1m       # how often to send updates about a group
+      repeat_interval: 4h      # re-send a still-firing alert this often
+      routes:
+        - matchers: ['severity="critical"']
+          receiver: slack-critical
+          repeat_interval: 1h  # critical repeats more often
+    receivers:
+      - name: slack-default
+        slack_configs:
+          - channel: "#finbot-alerts"
+            send_resolved: true
+            api_url_file: /etc/alertmanager/secrets/alertmanager-slack/webhook
+            color: '{{ if eq .Status "firing" }}danger{{ else }}good{{ end }}'
+            title: '{{ if eq .Status "firing" }}🔥 FIRING{{ else }}✅ RESOLVED{{ end }} · {{ .CommonLabels.alertname }} · {{ .CommonLabels.severity }}'
+            text: '{{ if eq .Status "firing" }}{{ range .Alerts }}*{{ .Annotations.summary }}* — {{ .Annotations.description }}{{ "\n" }}{{ end }}{{ else }}✅ Recovered — the condition has cleared.{{ end }}'
+      - name: slack-critical
+        slack_configs:
+          - channel: "#finbot-alerts"
+            send_resolved: true
+            api_url_file: /etc/alertmanager/secrets/alertmanager-slack/webhook
+            color: '{{ if eq .Status "firing" }}danger{{ else }}good{{ end }}'
+            title: '{{ if eq .Status "firing" }}🔥 [CRITICAL] FIRING{{ else }}✅ [CRITICAL] RESOLVED{{ end }} · {{ range .Alerts }}{{ .Labels.alertname }}{{ end }}'
+            text: '{{ if eq .Status "firing" }}{{ range .Alerts }}{{ .Annotations.description }}{{ "\n" }}{{ end }}{{ else }}✅ Recovered — the condition has cleared.{{ end }}'
 
-# ---- Grafana: capped so it doesn't OOM on a laptop ----
+# ---------------------------------------------------------------------------
+# Grafana (Deployment) — disabled locally to save memory (it OOM-killed at
+# 384Mi on kind, and it is not in the alert path). Re-enable on real nodes,
+# or raise the limit to ~512Mi to run it locally. Config kept so re-enabling
+# is a one-line change.
+# ---------------------------------------------------------------------------
 grafana:
   enabled: false
+  adminPassword: admin           # LOCAL ONLY — use a secret in production
+  defaultDashboardsEnabled: true
   resources:
-    requests: { cpu: "25m", memory: "128Mi" }
-    limits:   { memory: "512Mi" }     # 384Mi OOMs; 512Mi is stable
-  affinity:
-    nodeAffinity:
-      preferredDuringSchedulingIgnoredDuringExecution:
-        - weight: 100
-          preference:
-            matchExpressions:
-              - key: node-role
-                operator: In
-                values: ["infra"]
-  # default admin password; change for anything real
-  adminPassword: admin
+    requests: { cpu: 25m, memory: 128Mi }
+    limits:   { memory: 512Mi }
+  sidecar:
+    dashboards:
+      enabled: true
+      label: grafana_dashboard
 
-# ---- trim the node/kubelet exporters we don't need noisy on kind ----
-nodeExporter:
-  enabled: true
-kubeStateMetrics:
-  enabled: true
-
-# kind's control-plane components aren't scrapeable the same way as a real
-# cluster; disable the control-plane service monitors that just error on kind.
-kubeControllerManager:
-  enabled: false
-kubeScheduler:
-  enabled: false
-kubeProxy:
-  enabled: false
-kubeEtcd:
-  enabled: false
+# --- keep kube-state-metrics (pod/deployment signals the finbot rules use) + node-exporter ---
+kube-state-metrics:
+  resources:
+    requests: { cpu: 10m, memory: 32Mi }
+prometheus-node-exporter:
+  resources:
+    requests: { cpu: 10m, memory: 32Mi }

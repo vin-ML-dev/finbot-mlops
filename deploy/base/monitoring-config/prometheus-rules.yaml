@@ -1,0 +1,108 @@
+# PrometheusRules — the alert CONDITIONS. These are state-agnostic: a rule
+# describes WHEN something is wrong; the Alertmanager template (separate file)
+# owns the state-aware wording (firing vs resolved).
+#
+# The `release: kps` label is what the kube-prometheus-stack Prometheus selects
+# on to pick up OUR rules (the values-kind.yaml set ruleSelectorNilUsesHelmValues
+# false so this works).
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: finbot-rules
+  namespace: monitoring
+  labels:
+    release: kps
+spec:
+  groups:
+    # -----------------------------------------------------------------
+    # recording rules — precompute a few expensive/reused expressions
+    # -----------------------------------------------------------------
+    - name: finbot.recording
+      interval: 30s
+      rules:
+        - record: finbot:gateway_requests:rate5m
+          expr: sum(rate(gateway_requests_total[5m]))
+        - record: finbot:gateway_errors:rate5m
+          expr: sum(rate(gateway_requests_total{status=~"5.."}[5m]))
+        - record: finbot:gateway_error_ratio:rate5m
+          expr: |
+            finbot:gateway_errors:rate5m
+              / clamp_min(finbot:gateway_requests:rate5m, 1)
+
+    # -----------------------------------------------------------------
+    # availability alerts — readiness, not existence
+    # -----------------------------------------------------------------
+    - name: finbot.availability
+      rules:
+        # model pod not ready (0/1 = down). measures readiness, not existence.
+        - alert: ModelDown
+          expr: |
+            kube_deployment_status_replicas_available{namespace="finbot", deployment="llama-cpp"} < 1
+          for: 2m
+          labels:
+            severity: critical
+            component: model
+          annotations:
+            summary: "Model server is not serving"
+            description: "The llama-cpp deployment has no available replicas in namespace finbot."
+
+        # gateway has fewer than the desired replicas available
+        - alert: GatewayDegraded
+          expr: |
+            kube_deployment_status_replicas_available{namespace="finbot", deployment="gateway"}
+              < kube_deployment_spec_replicas{namespace="finbot", deployment="gateway"}
+          for: 5m
+          labels:
+            severity: warning
+            component: gateway
+          annotations:
+            summary: "Gateway is running below desired replicas"
+            description: "The gateway has fewer available replicas than desired for 5 minutes."
+
+        # gateway entirely down
+        - alert: GatewayDown
+          expr: |
+            kube_deployment_status_replicas_available{namespace="finbot", deployment="gateway"} < 1
+          for: 2m
+          labels:
+            severity: critical
+            component: gateway
+          annotations:
+            summary: "Gateway is down"
+            description: "The gateway has no available replicas in namespace finbot."
+
+    # -----------------------------------------------------------------
+    # quality / error-rate alerts
+    # -----------------------------------------------------------------
+    - name: finbot.errors
+      rules:
+        - alert: GatewayHighErrorRate
+          expr: finbot:gateway_error_ratio:rate5m > 0.10
+          for: 5m
+          labels:
+            severity: warning
+            component: gateway
+          annotations:
+            summary: "Gateway 5xx error ratio above 10%"
+            description: "More than 10% of gateway requests returned 5xx over the last 5 minutes."
+
+    # -----------------------------------------------------------------
+    # dead-man switch — the watcher must be watched
+    # -----------------------------------------------------------------
+    # CRITICAL: handle ABSENCE, not just staleness. Scaling the agent to 0
+    # deletes the heartbeat series entirely, so a staleness-only rule would
+    # never fire. absent() catches the series disappearing; the time() clause
+    # catches it going stale while still present.
+    - name: finbot.deadman
+      rules:
+        - alert: MonitoringAgentDown
+          expr: |
+            absent(monitoring_agent_heartbeat_timestamp_seconds)
+              or (time() - max(monitoring_agent_heartbeat_timestamp_seconds) > 120)
+          for: 1m
+          labels:
+            severity: critical
+            component: agent
+          annotations:
+            summary: "Monitoring agent heartbeat missing or stale"
+            description: "No agent heartbeat for over 2 minutes (or the series is absent). The watcher itself may be down."

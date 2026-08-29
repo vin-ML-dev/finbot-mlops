@@ -1,0 +1,29 @@
+# Child app (wave 4): the monitoring CONFIG — alert rules + Alertmanager routing.
+#
+# wave 4 = after the monitoring stack (wave 1) AND after the model/gateway
+# (waves 2-3) that emit the metrics these rules evaluate. The rules reference
+# the agent's heartbeat too, but the dead-man rule uses absent() so it works
+# even before the agent (component 8) exists — it simply fires "agent down"
+# until the agent starts, which is correct.
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: monitoring-config
+  namespace: argocd
+  annotations:
+    argocd.argoproj.io/sync-wave: "4"
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: finbot
+  source:
+    repoURL: "https://github.com/vin-ML-dev/finbot-mlops.git"
+    targetRevision: main
+    path: deploy/base/monitoring-config
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: monitoring
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true

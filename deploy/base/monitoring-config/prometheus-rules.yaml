@@ -38,6 +38,7 @@ spec:
         - alert: ModelDown
           expr: |
             kube_deployment_status_replicas_available{namespace="finbot", deployment="llama-cpp"} < 1
+            or absent(kube_deployment_status_replicas_available{namespace="finbot", deployment="llama-cpp"})
           for: 2m
           labels:
             severity: critical

@@ -243,7 +243,7 @@ class GatewayCanary:
         for case in self.cases:
             try:
                 response = requests.post(
-                    f"{self.gateway_base}/v1/generate",
+                    f"{self.gateway_base}/v1/chat/completions",
                     headers={"Authorization": f"Bearer {self.api_key}"},
                     json={
                         "messages": [{"role": "user", "content": case["prompt"]}],
@@ -252,9 +252,14 @@ class GatewayCanary:
                     },
                     timeout=60,
                 )
-                responses[case["name"]] = (
-                    response.json().get("content", "") if response.status_code == 200 else ""
-                )
+                if response.status_code == 200:
+                    data = response.json()
+                    # OpenAI-format response from the gateway
+                    responses[case["name"]] = (
+                        data.get("choices", [{}])[0].get("message", {}).get("content", "")
+                    )
+                else:
+                    responses[case["name"]] = ""
             except Exception:
                 responses[case["name"]] = ""
         return evaluate_cases(responses, self.cases)

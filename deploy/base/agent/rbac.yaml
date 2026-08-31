@@ -1,0 +1,34 @@
+# The agent reads cluster state (deployments, pods) to correlate incidents, but
+# NEVER modifies anything — the "LLM explains, never fixes" principle enforced at
+# the RBAC layer. A dedicated ServiceAccount with a read-only (get/list/watch)
+# ClusterRole. No create/update/delete/patch verbs anywhere.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: finbot-agent
+  namespace: finbot
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: finbot-agent-readonly
+rules:
+  - apiGroups: ["apps"]
+    resources: ["deployments", "replicasets"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: [""]
+    resources: ["pods", "services"]
+    verbs: ["get", "list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: finbot-agent-readonly
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: finbot-agent-readonly
+subjects:
+  - kind: ServiceAccount
+    name: finbot-agent
+    namespace: finbot

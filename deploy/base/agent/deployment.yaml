@@ -1,0 +1,64 @@
+# Monitoring agent — Node C (the explanation layer, Path 2).
+#
+# This is the LangGraph agent that reads Prometheus, probes the gateway/model,
+# classifies health with the same thresholds as the alert rules, and uses the
+# LLM to EXPLAIN incidents (never detect-only, never fix). It emits the
+# heartbeat the dead-man rule watches — once this runs, MonitoringAgentDown
+# stops firing.
+#
+# Pinned to Node C (node-role=agent + toleration for dedicated=agent), stateless
+# (its incident state lives in Redis), single replica (one watcher is enough).
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: agent
+  namespace: finbot
+  labels:
+    app: agent
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate           # one watcher; no need for rolling overlap
+  selector:
+    matchLabels:
+      app: agent
+  template:
+    metadata:
+      labels:
+        app: agent
+    spec:
+      serviceAccountName: finbot-agent    # read-only access (rbac.yaml)
+      # --- pin to Node C (agent) ---
+      nodeSelector:
+        node-role: agent
+      tolerations:
+        - key: "dedicated"
+          operator: "Equal"
+          value: "agent"
+          effect: "NoSchedule"
+      containers:
+        - name: agent
+          image: docker.io/library/finbot-agent:local   # <-- sideload like the gateway, or use a registry
+          imagePullPolicy: Never                          # local sideloaded image
+          ports:
+            - name: metrics
+              containerPort: 9108
+          env:
+            # secrets from the sealed agent-secret (component 2)
+            - name: SLACK_WEBHOOK
+              valueFrom:
+                secretKeyRef: { name: agent-secret, key: SLACK_WEBHOOK }
+            - name: OPENAI_API_KEY
+              valueFrom:
+                secretKeyRef: { name: agent-secret, key: OPENAI_API_KEY }
+            - name: GATEWAY_API_KEY
+              valueFrom:
+                secretKeyRef: { name: agent-secret, key: GATEWAY_API_KEY }
+          resources:
+            requests: { cpu: "50m", memory: "128Mi" }
+            limits:   { memory: "256Mi" }
+          # liveness = is the heartbeat metric server up? (scrape the metrics port)
+          livenessProbe:
+            httpGet: { path: /metrics, port: 9108 }
+            initialDelaySeconds: 15
+            periodSeconds: 30

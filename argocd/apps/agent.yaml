@@ -1,0 +1,27 @@
+# Child app (wave 5): the monitoring agent — the last workload.
+#
+# wave 5 = after everything it observes (model wave 2, gateway wave 3,
+# monitoring-config wave 4). Once this runs and emits its heartbeat, the
+# MonitoringAgentDown dead-man alert (from wave 4) stops firing.
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: agent
+  namespace: argocd
+  annotations:
+    argocd.argoproj.io/sync-wave: "5"
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: finbot
+  source:
+    repoURL: "https://github.com/vin-ML-dev/finbot-mlops.git"
+    targetRevision: main
+    path: deploy/base/agent
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: finbot
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true

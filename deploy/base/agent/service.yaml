@@ -1,0 +1,16 @@
+# Service exposing the agent's /metrics (heartbeat) for Prometheus to scrape.
+apiVersion: v1
+kind: Service
+metadata:
+  name: agent-svc
+  namespace: finbot
+  labels:
+    app: agent
+spec:
+  selector:
+    app: agent
+  ports:
+    - name: metrics
+      port: 9108
+      targetPort: 9108
+  type: ClusterIP

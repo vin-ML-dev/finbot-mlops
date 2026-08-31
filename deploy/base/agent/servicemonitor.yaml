@@ -1,0 +1,20 @@
+# Prometheus scrapes the agent's heartbeat metric (release: kps selects it).
+# THIS is what feeds monitoring_agent_heartbeat_timestamp_seconds to Prometheus,
+# which the dead-man rule watches.
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: agent
+  namespace: finbot
+  labels:
+    release: kps
+spec:
+  selector:
+    matchLabels:
+      app: agent
+  namespaceSelector:
+    matchNames: [finbot]
+  endpoints:
+    - port: metrics
+      path: /metrics
+      interval: 30s

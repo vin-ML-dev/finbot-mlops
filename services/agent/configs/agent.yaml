@@ -1,0 +1,39 @@
+# Monitoring agent configuration — cluster service names + schedule + thresholds.
+# The LLM never writes PromQL; these are the fixed queries and thresholds it uses.
+
+metrics_port: 9108        # agent exposes /metrics here (heartbeat lives here)
+
+prometheus:
+  base_url: "http://kps-prometheus.monitoring:9090"
+
+redis:
+  url: "redis://redis-svc.finbot:6379/1"   # db 1 (gateway uses db 0)
+
+gateway:
+  base_url: "http://fastapi-gateway-svc.finbot:8000"
+
+model:
+  base_url: "http://llama-cpp-svc.finbot:8080"
+
+# canary: periodically send a known prompt through the gateway and check the answer
+canary:
+  api_key_env: "GATEWAY_API_KEY"      # read the gateway key from this env (sealed secret)
+  cases:
+    - prompt: "What is compound interest? Answer in one sentence."
+      expect_contains: ["interest"]
+
+schedule:
+  poll_interval_seconds: 30           # health poll cadence
+  canary_interval_seconds: 900        # run a canary every 15 min
+  daily_hour_utc: 6                   # daily summary at 06:00 UTC
+
+# deterministic health thresholds (same spirit as the Prometheus rules)
+thresholds:
+  p95_latency_seconds: 5.0
+  error_ratio: 0.10
+  min_model_replicas: 1
+
+# LLM explainer (explains incidents; does NOT detect or fix)
+explainer:
+  model: "gpt-4o-mini"
+  enabled: true
